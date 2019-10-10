@@ -50,6 +50,9 @@ mod std {
     pub use core::*;
 }
 
+#[macro_use]
+extern crate mirai_annotations;
+
 use std::borrow::{Borrow, BorrowMut};
 use std::cmp;
 use std::fmt;
@@ -195,6 +198,7 @@ pub trait VecLike<T>:
 impl<T> VecLike<T> for Vec<T> {
     #[inline]
     fn push(&mut self, value: T) {
+        assume!(self.len() < usize::max_value());
         Vec::push(self, value);
     }
 }
@@ -580,12 +584,14 @@ impl<A: Array> SmallVec<A> {
     #[inline]
     fn triple_mut(&mut self) -> (*mut A::Item, &mut usize, usize) {
         unsafe {
-            if self.spilled() {
+            let result = if self.spilled() {
                 let &mut (ptr, ref mut len_ptr) = self.data.heap_mut();
                 (ptr, len_ptr, self.capacity)
             } else {
                 (self.data.inline_mut().ptr_mut(), &mut self.capacity, A::size())
-            }
+            };
+            assumed_postcondition!(*result.1 <= result.2);
+            result
         }
     }
 
@@ -643,6 +649,7 @@ impl<A: Array> SmallVec<A> {
     ///
     /// Panics if `new_cap` is less than the vector's length.
     pub fn grow(&mut self, new_cap: usize) {
+        precondition!(self.len() <= new_cap);
         unsafe {
             let (ptr, &mut len, cap) = self.triple_mut();
             let unspilled = !self.spilled();
@@ -684,12 +691,16 @@ impl<A: Array> SmallVec<A> {
         // so that the optimizer removes duplicated calls to it
         // from callers like insert()
         let (_, &mut len, cap) = self.triple_mut();
-        if cap - len < additional {
+        let new_cap = if cap - len < additional {
             let new_cap = len.checked_add(additional).
                 and_then(usize::checked_next_power_of_two).
                 unwrap_or(usize::max_value());
             self.grow(new_cap);
-        }
+            new_cap
+        } else {
+            cap
+        };
+        assumed_postcondition!(new_cap >= cap);
     }
 
     /// Reserve the minimum capacity for `additional` more elements to be inserted.
@@ -697,12 +708,20 @@ impl<A: Array> SmallVec<A> {
     /// Panics if the new capacity overflows `usize`.
     pub fn reserve_exact(&mut self, additional: usize) {
         let (_, &mut len, cap) = self.triple_mut();
-        if cap - len < additional {
+        let new_cap = if cap - len < additional {
             match len.checked_add(additional) {
-                Some(cap) => self.grow(cap),
-                None => panic!("reserve_exact overflow"),
+                Some(cap) => {
+                    self.grow(cap);
+                    cap
+                }
+                None => {
+                    assume_unreachable!(); //"can't possibly be allocating that much memory");
+                }
             }
-        }
+        } else {
+            cap
+        };
+        assumed_postcondition!(new_cap >= cap);
     }
 
     /// Shrink the capacity of the vector as much as possible.
@@ -900,6 +919,7 @@ impl<A: Array> SmallVec<A> {
             if !f(&mut self[i]) {
                 del += 1;
             } else if del > 0 {
+                assume!(del <= i);
                 self.swap(i - del, i);
             }
         }
@@ -934,6 +954,7 @@ impl<A: Array> SmallVec<A> {
                         let p_w = p_wm1.offset(1);
                         mem::swap(&mut *p_r, &mut *p_w);
                     }
+                    assume!(w < usize::max_value());
                     w += 1;
                 }
             }
@@ -1062,10 +1083,10 @@ impl<A: Array> SmallVec<A> where A::Item: Copy {
     ///
     /// For slices of `Copy` types, this is more efficient than `insert`.
     pub fn insert_from_slice(&mut self, index: usize, slice: &[A::Item]) {
+        checked_precondition!(index <= self.len());
         self.reserve(slice.len());
 
         let len = self.len();
-        assert!(index <= len);
 
         unsafe {
             let slice_ptr = slice.as_ptr();
@@ -1297,6 +1318,7 @@ macro_rules! impl_index {
             type Output = $output_type;
             #[inline]
             fn index(&self, index: $index_type) -> &$output_type {
+                // precondition! here but how?
                 &(&**self)[index]
             }
         }
@@ -1304,6 +1326,7 @@ macro_rules! impl_index {
         impl<A: Array> ops::IndexMut<$index_type> for SmallVec<A> {
             #[inline]
             fn index_mut(&mut self, index: $index_type) -> &mut $output_type {
+                // precondition! here but how?
                 &mut (&mut **self)[index]
             }
         }
@@ -1468,7 +1491,8 @@ impl<A: Array> Iterator for IntoIter<A> {
 
     #[inline]
     fn next(&mut self) -> Option<A::Item> {
-        if self.current == self.end {
+        assume!(self.current <= self.end);
+        let result = if self.current == self.end {
             None
         }
         else {
@@ -1477,11 +1501,14 @@ impl<A: Array> Iterator for IntoIter<A> {
                 self.current += 1;
                 Some(ptr::read(self.data.as_ptr().offset(current)))
             }
-        }
+        };
+        postcondition!(self.current <= self.end);
+        result
     }
 
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
+        assume!(self.current <= self.end);
         let size = self.end - self.current;
         (size, Some(size))
     }
@@ -1490,7 +1517,8 @@ impl<A: Array> Iterator for IntoIter<A> {
 impl<A: Array> DoubleEndedIterator for IntoIter<A> {
     #[inline]
     fn next_back(&mut self) -> Option<A::Item> {
-        if self.current == self.end {
+        assume!(self.current <= self.end);
+        let result = if self.current == self.end {
             None
         }
         else {
@@ -1498,7 +1526,9 @@ impl<A: Array> DoubleEndedIterator for IntoIter<A> {
                 self.end -= 1;
                 Some(ptr::read(self.data.as_ptr().offset(self.end as isize)))
             }
-        }
+        };
+        postcondition!(self.current <= self.end);
+        result
     }
 }
 
